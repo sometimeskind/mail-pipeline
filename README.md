@@ -1,13 +1,18 @@
 # mail-pipeline
 
-Dockerized mail pipeline: Proton Bridge IMAP → `mbsync` → Maildir → `notmuch` index → PDF attachments to Paperless.
+Dockerized mail pipeline: Proton Bridge IMAP ↔ `mbsync` ↔ Maildir → `notmuch` index → PDF attachments to Paperless.
 
 ```
-Proton Bridge IMAP → mbsync → /maildir → notmuch → extract PDFs → Paperless
-                                                  → push metrics → Pushgateway
+Proton ↔ Bridge ↔ mbsync ↔ /maildir ↔ Dovecot ↔ Thunderbird (or any IMAP client)
+                              ↓
+                           notmuch
+                              ↓
+                       extract PDFs → Paperless
+                              ↓
+                         push metrics → Pushgateway
 ```
 
-A single long-running container runs a Prefect flow on a configurable schedule (default every 5 minutes) and exposes a small HTTP API for health probes and on-demand triggers.
+`mbsync` is **bidirectional**. New mail flows down from Proton; local changes (deletes, moves, flag/Seen changes made by a mail client through Dovecot) flow back up on the next sync. A single long-running container runs a Prefect flow on a configurable schedule (default every 5 minutes) and exposes a small HTTP API for health probes and on-demand triggers.
 
 | Flow | Default schedule | Tasks |
 |---|---|---|
@@ -34,6 +39,45 @@ curl -X POST http://localhost:8080/sync/trigger \
 ```
 
 No shared volumes, lock files, or other in-pod coordination are required. Prefect handles coalescing.
+
+## Bidirectional architecture (Dovecot + IMAP client)
+
+`/maildir` is meant to be shared with a Dovecot sidecar so a mail client (e.g. Thunderbird) can read and write the same store. The expected layout:
+
+```
+Proton ↔ Bridge ↔ [this container: mbsync + notmuch + extract]
+                          ↕
+                       /maildir   (shared PVC)
+                          ↕
+                  [sidecar: Dovecot IMAP]
+                          ↕
+                    Thunderbird / mutt / …
+```
+
+### Concurrency
+
+`mbsync` and Dovecot both write `/maildir`. Each handles its own atomic-rename and Maildir-level locking; they are designed to coexist. No flock or coordination from this codebase is required.
+
+### Flag synchronisation
+
+For Thunderbird's read/unread/flagged state to round-trip back to Proton, the cluster's `notmuch-config` should set `maildir.synchronize_flags = true`. The chain becomes:
+
+```
+Thunderbird marks read
+  → Dovecot writes the `S` flag into the Maildir filename
+  → next `notmuch new` reflects the flag in notmuch's DB
+  → next `mbsync` syncs the flag to Bridge → Proton
+```
+
+Inbound flag changes (e.g. read on the Proton web UI) flow the same way in reverse.
+
+### `+paperless` does not propagate to Proton
+
+The `+paperless` tag is written only to notmuch's database — it is a local marker so already-processed messages are not re-submitted. It is **not** visible in Thunderbird or as a Proton label. Surfacing it requires a custom Maildir keyword mapped to a synchronisable flag in both `notmuch-config` and `mbsyncrc`; that mapping lives in the cluster, not in this image.
+
+### Outbound latency
+
+Local changes (Thunderbird → Dovecot → Maildir) propagate to Proton on the next `mail` flow run — at most `FETCH_CRON` minutes (default 5). For lower latency, the cluster can run a separate Maildir-watching sidecar (e.g. `inotifywait` on `/maildir`) that calls `POST /sync/trigger` on local writes — the outbound mirror of the inbound goimapnotify pattern.
 
 ## Environment variables
 
