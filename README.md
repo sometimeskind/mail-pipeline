@@ -12,9 +12,9 @@ Proton ↔ Bridge ↔ mbsync ↔ /maildir ↔ Dovecot ↔ Thunderbird (or any IM
                          push metrics → Pushgateway
 ```
 
-`mbsync` is **bidirectional**. New mail flows down from Proton; local changes (deletes, moves, flag/Seen changes made by a mail client through Dovecot) flow back up on the next sync. A single long-running container runs a Prefect flow on a configurable schedule (default every 5 minutes) and exposes a small HTTP API for health probes and on-demand triggers.
+`mbsync` is **bidirectional**. New mail flows down from Proton; local changes (deletes, moves, flag/Seen changes made by a mail client through Dovecot) flow back up. A single long-running container runs a Prefect flow on event-driven triggers from the cluster (with a cron-backstop) and exposes a small HTTP API for health probes and on-demand triggers — see [Trigger architecture](#trigger-architecture).
 
-| Flow | Default schedule | Tasks |
+| Flow | Backstop schedule | Tasks |
 |---|---|---|
 | `mail` | `*/5 * * * *` (`FETCH_CRON`) | `sync_mail` → `index_mail` → `extract_pdfs` → `push_metrics` |
 
@@ -27,18 +27,28 @@ Proton ↔ Bridge ↔ mbsync ↔ /maildir ↔ Dovecot ↔ Thunderbird (or any IM
 
 `/sync/trigger` and the cron schedule both submit runs of the same Prefect deployment. Overlapping runs are coalesced by a Prefect named concurrency limit (`mail-pipeline`, `occupy=1`, `timeout_seconds=0`) — a second run that finds the slot taken exits immediately rather than queuing.
 
-## IMAP IDLE / sidecar integration
+## Trigger architecture
 
-This image is the **primary container only**. It does not include an IMAP IDLE watcher. The Kubernetes manifests (in `sometimeskind/homelab`) are responsible for any sidecar (e.g. `goimapnotify`) that watches Bridge IMAP and triggers near-real-time syncs.
+The `mail` flow is intended to run on **event-driven triggers** from two cluster-side sidecars. The cron schedule is a backstop, not the primary mechanism.
 
-The integration contract is the HTTP API: the sidecar's `onNewMail` hook runs
+| Trigger | Direction | How | Latency |
+|---|---|---|---|
+| `goimapnotify` sidecar | Inbound (Proton → `/maildir`) | Watches Bridge over IMAP IDLE; on new mail, calls `POST /sync/trigger` | Near real-time |
+| `inotifywait` sidecar | Outbound (`/maildir` → Proton) | Watches `/maildir` for local writes (Dovecot, mail clients); on change, calls `POST /sync/trigger` | Near real-time |
+| Cron (`FETCH_CRON`) | Both | Submits a flow run regardless of activity | Up to `FETCH_CRON` minutes |
+
+The sidecars themselves live in the cluster (`sometimeskind/homelab`), not this image. The integration contract is just the HTTP API:
 
 ```sh
 curl -X POST http://localhost:8080/sync/trigger \
      -H "Authorization: Bearer $API_BEARER_TOKEN"
 ```
 
-No shared volumes, lock files, or other in-pod coordination are required. Prefect handles coalescing.
+Overlapping triggers are coalesced by a Prefect named concurrency limit (`mail-pipeline`, `occupy=1`, `timeout_seconds=0`); a second run that finds the slot taken exits immediately and the next trigger or cron tick picks up any missed work. Fire `/sync/trigger` as often as you like.
+
+`FETCH_CRON` defaults to `*/5 * * * *` so that a sidecar restart, crash, or network blip is caught within 5 minutes. With both sidecars reliable, raising this (e.g. `0 * * * *`) is safe.
+
+No shared volumes, lock files, or other in-pod coordination are required.
 
 ## Bidirectional architecture (Dovecot + IMAP client)
 
@@ -75,9 +85,9 @@ Inbound flag changes (e.g. read on the Proton web UI) flow the same way in rever
 
 The `+paperless` tag is written only to notmuch's database — it is a local marker so already-processed messages are not re-submitted. It is **not** visible in Thunderbird or as a Proton label. Surfacing it requires a custom Maildir keyword mapped to a synchronisable flag in both `notmuch-config` and `mbsyncrc`; that mapping lives in the cluster, not in this image.
 
-### Outbound latency
+### Outbound trigger
 
-Local changes (Thunderbird → Dovecot → Maildir) propagate to Proton on the next `mail` flow run — at most `FETCH_CRON` minutes (default 5). For lower latency, the cluster can run a separate Maildir-watching sidecar (e.g. `inotifywait` on `/maildir`) that calls `POST /sync/trigger` on local writes — the outbound mirror of the inbound goimapnotify pattern.
+Local changes (Thunderbird → Dovecot → `/maildir`) propagate to Proton when the cluster's `inotifywait` sidecar sees the write and calls `POST /sync/trigger`. See [Trigger architecture](#trigger-architecture).
 
 ## Environment variables
 
