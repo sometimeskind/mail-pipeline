@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+import time
+
+logger = logging.getLogger(__name__)
 
 
 def _env(notmuch_config: str) -> dict[str, str]:
@@ -12,7 +16,18 @@ def _env(notmuch_config: str) -> dict[str, str]:
 
 def index_mail(notmuch_config: str) -> None:
     """Run `notmuch new` to index any newly synced messages."""
-    subprocess.run(["notmuch", "new"], check=True, env=_env(notmuch_config))
+    started = time.perf_counter()
+    result = subprocess.run(
+        ["notmuch", "new"],
+        check=True, capture_output=True, text=True,
+        env=_env(notmuch_config),
+    )
+    elapsed = time.perf_counter() - started
+    output = (result.stdout or "").strip()
+    if output:
+        logger.info("notmuch new (%.2fs): %s", elapsed, output.replace("\n", " | "))
+    else:
+        logger.info("notmuch new finished in %.2fs (no output)", elapsed)
 
 
 def search_message_ids(query: str, notmuch_config: str) -> list[str]:
