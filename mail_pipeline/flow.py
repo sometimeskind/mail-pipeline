@@ -52,7 +52,7 @@ def push_metrics_task() -> None:
 def mail_flow() -> None:
     logger = get_run_logger()
     try:
-        with concurrency("mail-pipeline", occupy=1, timeout_seconds=0):
+        with concurrency("mail-pipeline", occupy=1, timeout_seconds=10):
             sync_mail_task()
             index_mail_task()
             extract_pdfs_task()
