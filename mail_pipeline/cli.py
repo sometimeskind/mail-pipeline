@@ -32,7 +32,7 @@ def main() -> None:
     from mail_pipeline.flow import mail_flow
     from mail_pipeline.prefect_client import ensure_concurrency_limits
 
-    fetch_cron = os.environ.get("FETCH_CRON", "*/5 * * * *")
+    fetch_cron = os.environ.get("FETCH_CRON")
 
     # Start Flask first so /health responds immediately, even while Prefect
     # init below is still retrying against a slow or starting server.
@@ -48,5 +48,5 @@ def main() -> None:
 
     deployment = mail_flow.to_deployment(name="mail", cron=fetch_cron)
 
-    logger.info("Starting Prefect runner (FETCH_CRON=%s)", fetch_cron)
+    logger.info("Starting Prefect runner (FETCH_CRON=%s)", fetch_cron or "disabled")
     prefect_serve(deployment)
