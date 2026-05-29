@@ -11,12 +11,23 @@ logger = logging.getLogger(__name__)
 
 def run_mbsync(mbsync_config: str, channel: str = "proton") -> None:
     started = time.perf_counter()
-    result = subprocess.run(
-        ["mbsync", "-c", mbsync_config, channel],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["mbsync", "-c", mbsync_config, channel],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            "mbsync %s failed (exit %d, %.2fs)\nstdout:\n%s\nstderr:\n%s",
+            channel,
+            e.returncode,
+            time.perf_counter() - started,
+            (e.stdout or "").strip(),
+            (e.stderr or "").strip(),
+        )
+        raise
     elapsed = time.perf_counter() - started
 
     stdout = (result.stdout or "").strip()
